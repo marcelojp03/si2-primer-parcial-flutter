@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "774436803377",
+    "project_id": "auxilio-mecanico-bd52a",
+    "storage_bucket": "auxilio-mecanico-bd52a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:774436803377:android:eee6ff81073b2324d79610",
+        "android_client_info": {
+          "package_name": "com.example.si2_p1_mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC-2IewgbVz0s4elKUBbTNTGFLBvSn1Tio"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
