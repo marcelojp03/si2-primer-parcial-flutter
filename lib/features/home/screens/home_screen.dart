@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:si2_p1_mobile/config/theme/theme_provider.dart';
+import 'package:si2_p1_mobile/core/services/sync_service.dart';
 import 'package:si2_p1_mobile/shared/widgets/custom_filled_button.dart';
 import 'package:si2_p1_mobile/shared/widgets/glass_card.dart';
 
@@ -14,6 +15,8 @@ class HomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final themeMode = ref.watch(themeNotifierProvider);
+    final pendingAsync = ref.watch(pendingIncidentsCountProvider);
+    final pendingCount = pendingAsync.asData?.value ?? 0;
 
     return Scaffold(
       appBar: AppBar(
@@ -40,6 +43,40 @@ class HomeScreen extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Banner de emergencias pendientes offline
+              if (pendingCount > 0) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.orange.shade300),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.cloud_upload_outlined,
+                        color: Colors.orange,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          '$pendingCount emergencia${pendingCount > 1 ? 's' : ''} pendiente${pendingCount > 1 ? 's' : ''} de envío',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: Colors.orange.shade800,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               // Banner de emergencia
               GlassCard(
                 padding: const EdgeInsets.all(20),

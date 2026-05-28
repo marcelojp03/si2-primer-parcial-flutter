@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:si2_p1_mobile/config/theme/app_theme.dart';
 import 'package:si2_p1_mobile/core/models/incident_model.dart';
 import 'package:si2_p1_mobile/core/services/incident_service.dart';
+import 'package:si2_p1_mobile/core/services/ws_service.dart';
 import 'package:si2_p1_mobile/shared/widgets/glass_card.dart';
 
 class IncidentTrackingScreen extends ConsumerStatefulWidget {
@@ -23,9 +24,12 @@ class IncidentTrackingScreen extends ConsumerStatefulWidget {
 class _IncidentTrackingScreenState
     extends ConsumerState<IncidentTrackingScreen> {
   Timer? _pollingTimer;
+  StreamSubscription<Map<String, dynamic>>? _wsSub;
   IncidentModel? _incident;
   AssignmentModel? _assignment;
   WorkshopModel? _workshop;
+  // Posición en tiempo real del técnico (actualizada vía WS)
+  LatLng? _technicianPosition;
   bool _loading = true;
   String? _error;
 
@@ -37,11 +41,28 @@ class _IncidentTrackingScreenState
       const Duration(seconds: 15),
       (_) => _fetchData(),
     );
+    _subscribeWs();
+  }
+
+  void _subscribeWs() {
+    final ws = ref.read(wsServiceProvider);
+    _wsSub = ws.on('incident.location_updated').listen((msg) {
+      final payload = msg['payload'] as Map<String, dynamic>?;
+      if (payload == null) return;
+      final incidentId = payload['incident_id'] as int?;
+      if (incidentId != widget.incidentId) return;
+      final lat = (payload['latitude'] as num?)?.toDouble();
+      final lng = (payload['longitude'] as num?)?.toDouble();
+      if (lat != null && lng != null && mounted) {
+        setState(() => _technicianPosition = LatLng(lat, lng));
+      }
+    });
   }
 
   @override
   void dispose() {
     _pollingTimer?.cancel();
+    _wsSub?.cancel();
     super.dispose();
   }
 
@@ -178,7 +199,18 @@ class _IncidentTrackingScreenState
                                       size: 40,
                                     ),
                                   ),
-                                  if (_workshop != null)
+                                  if (_technicianPosition != null)
+                                    Marker(
+                                      point: _technicianPosition!,
+                                      width: 40,
+                                      height: 40,
+                                      child: const Icon(
+                                        Icons.directions_car_rounded,
+                                        color: Colors.green,
+                                        size: 36,
+                                      ),
+                                    )
+                                  else if (_workshop != null)
                                     Marker(
                                       point: LatLng(
                                         _workshop!.latitude,

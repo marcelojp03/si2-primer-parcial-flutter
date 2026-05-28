@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:go_router/go_router.dart';
+import 'package:uuid/uuid.dart';
+import 'package:si2_p1_mobile/core/models/local_incident_model.dart';
 import 'package:si2_p1_mobile/core/services/incident_service.dart';
+import 'package:si2_p1_mobile/core/services/local_incident_repository.dart';
 import 'package:si2_p1_mobile/core/services/vehicle_service.dart';
 import 'package:si2_p1_mobile/core/models/vehicle_model.dart';
 import 'package:si2_p1_mobile/features/auth/providers/auth_provider.dart';
@@ -117,6 +121,38 @@ class _NewIncidentScreenState extends ConsumerState<NewIncidentScreen> {
       setState(() => _isLoading = false);
       return;
     }
+
+    // Generar uuid_cliente para idempotencia offline
+    final uuidCliente = const Uuid().v4();
+
+    // Verificar conectividad
+    final connectivity = await Connectivity().checkConnectivity();
+    final isOnline = connectivity.any((r) => r != ConnectivityResult.none);
+
+    if (!isOnline) {
+      // Modo offline: guardar en Hive con PENDIENTE_SYNC
+      final draft = LocalIncidentModel(
+        uuid: uuidCliente,
+        title: _titleCtrl.text.trim(),
+        descriptionText: _descCtrl.text.trim(),
+        latitude: _position!.latitude,
+        longitude: _position!.longitude,
+        vehicleId: _selectedVehicle!.id,
+        syncStatus: 'PENDIENTE_SYNC',
+      );
+      await LocalIncidentRepository().save(draft);
+      if (mounted) {
+        setState(() => _isLoading = false);
+        AppToast.info(
+          context,
+          message:
+              'Sin conexión. Emergencia guardada. Se enviará al recuperar red.',
+        );
+        context.go('/home');
+      }
+      return;
+    }
+
     try {
       final service = IncidentService();
       final incident = await service.createIncident(
@@ -126,6 +162,7 @@ class _NewIncidentScreenState extends ConsumerState<NewIncidentScreen> {
         descriptionText: _descCtrl.text.trim(),
         latitude: _position!.latitude,
         longitude: _position!.longitude,
+        uuidCliente: uuidCliente,
       );
 
       if (_photo != null) {

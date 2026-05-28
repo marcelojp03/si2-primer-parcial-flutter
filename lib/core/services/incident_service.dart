@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:si2_p1_mobile/core/api/api_client.dart';
 import 'package:si2_p1_mobile/core/api/api_exceptions.dart';
 import 'package:si2_p1_mobile/core/models/incident_model.dart';
+import 'package:si2_p1_mobile/core/models/local_incident_model.dart';
 
 class IncidentService {
   final ApiClient _client = ApiClient();
@@ -15,6 +16,7 @@ class IncidentService {
     required double longitude,
     bool requiresTow = false,
     String? referenceAddress,
+    String? uuidCliente,
   }) async {
     try {
       final response = await _client.post(
@@ -28,11 +30,45 @@ class IncidentService {
           'longitude': longitude,
           'requires_tow': requiresTow,
           if (referenceAddress != null) 'reference_address': referenceAddress,
+          if (uuidCliente != null) 'uuid_cliente': uuidCliente,
         },
       );
       return IncidentModel.fromJson(response.data as Map<String, dynamic>);
     } on DioException catch (e) {
       throw ApiException.fromDioError(e);
+    }
+  }
+
+  /// Crea un incidente desde un borrador local (CU31 — sync offline).
+  /// Si el servidor responde 409, retorna el incidente existente (idempotencia).
+  Future<IncidentModel> createIncidentWithUuid(LocalIncidentModel local) async {
+    try {
+      final response = await _client.post(
+        '/incidents',
+        data: {
+          'vehicle_id': local.vehicleId,
+          'title': local.title,
+          if (local.descriptionText != null)
+            'description_text': local.descriptionText,
+          'latitude': local.latitude,
+          'longitude': local.longitude,
+          'requires_tow': local.requiresTow,
+          if (local.referenceAddress != null)
+            'reference_address': local.referenceAddress,
+          'uuid_cliente': local.uuid,
+        },
+      );
+      return IncidentModel.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      final ex = ApiException.fromDioError(e);
+      // 409 = ya existe — el backend devuelve el incidente existente
+      if (ex.statusCode == 409) {
+        final data = e.response?.data;
+        if (data is Map<String, dynamic>) {
+          return IncidentModel.fromJson(data);
+        }
+      }
+      throw ex;
     }
   }
 

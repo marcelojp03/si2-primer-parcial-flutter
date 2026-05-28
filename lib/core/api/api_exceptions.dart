@@ -3,14 +3,18 @@ import 'package:dio/dio.dart';
 class ApiException implements Exception {
   final int? statusCode;
   final String message;
+  /// ID del recurso existente (presente en respuesta 409).
+  final int? existingId;
 
-  const ApiException({this.statusCode, required this.message});
+  const ApiException({this.statusCode, required this.message, this.existingId});
 
   factory ApiException.fromDioError(DioException error) {
     final status = error.response?.statusCode;
     final data = error.response?.data;
 
     String message;
+    int? existingId;
+
     if (data is Map && data.containsKey('detail')) {
       message = data['detail'].toString();
     } else if (error.type == DioExceptionType.connectionTimeout ||
@@ -30,7 +34,12 @@ class ApiException implements Exception {
       };
     }
 
-    return ApiException(statusCode: status, message: message);
+    // Extraer ID del recurso existente en respuesta 409
+    if (status == 409 && data is Map) {
+      existingId = data['id'] as int?;
+    }
+
+    return ApiException(statusCode: status, message: message, existingId: existingId);
   }
 
   @override

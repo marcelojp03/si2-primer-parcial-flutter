@@ -64,7 +64,7 @@ class NotificationService {
   }
 
   void _setupMessageHandlers() {
-    // Foreground
+    // Foreground FCM
     FirebaseMessaging.onMessage.listen((message) {
       developer.log(
         '📩 [FCM Foreground] ${message.notification?.title}',
@@ -72,6 +72,33 @@ class NotificationService {
       );
       _showLocalNotification(message);
     });
+
+    // FCM: incidente actualizado con app en background/cerrada
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  }
+
+  /// Muestra un banner in-app a partir de un mensaje WS notification.new.
+  /// Llamar desde la pantalla activa con el BuildContext.
+  void showWsBanner({
+    required String title,
+    required String message,
+    Function()? onTap,
+  }) {
+    _pendingBanner = InAppBanner(title: title, message: message, onTap: onTap);
+    for (final cb in _bannerListeners) {
+      cb(_pendingBanner!);
+    }
+  }
+
+  InAppBanner? _pendingBanner;
+  final List<void Function(InAppBanner)> _bannerListeners = [];
+
+  void addBannerListener(void Function(InAppBanner) cb) {
+    _bannerListeners.add(cb);
+  }
+
+  void removeBannerListener(void Function(InAppBanner) cb) {
+    _bannerListeners.remove(cb);
   }
 
   Future<void> _showLocalNotification(RemoteMessage message) async {
@@ -99,4 +126,12 @@ class NotificationService {
   Future<String?> getToken() async {
     return _messaging.getToken();
   }
+}
+
+/// Datos de un banner in-app generado por WS.
+class InAppBanner {
+  final String title;
+  final String message;
+  final Function()? onTap;
+  _InAppBanner({required this.title, required this.message, this.onTap});
 }
