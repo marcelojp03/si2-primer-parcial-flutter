@@ -49,6 +49,10 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>La app necesita acceso a tu ubicación para mostrar el tracking del auxilio y enviar la posición del técnico.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>La app necesita acceso a tu ubicación en segundo plano para seguir enviando la posición del técnico durante el servicio.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

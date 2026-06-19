@@ -11,6 +11,7 @@ class IncidentModel {
   final double longitude;
   final String? priorityLevel;
   final bool requiresTow;
+  final String serviceModality;
   final String requestedAt;
 
   const IncidentModel({
@@ -26,8 +27,12 @@ class IncidentModel {
     required this.longitude,
     this.priorityLevel,
     required this.requiresTow,
+    this.serviceModality = 'A_DOMICILIO',
     required this.requestedAt,
   });
+
+  bool get isClientGoesToWorkshop => serviceModality == 'CLIENTE_VE_TALLER';
+  bool get isAtHome => serviceModality == 'A_DOMICILIO';
 
   /// Nombre aproximado del estado basado en el ID (según datos sembrados).
   String get statusLabel {
@@ -57,6 +62,7 @@ class IncidentModel {
     longitude: (json['longitude'] as num).toDouble(),
     priorityLevel: json['priority_level'] as String?,
     requiresTow: json['requires_tow'] as bool? ?? false,
+    serviceModality: json['service_modality'] as String? ?? 'A_DOMICILIO',
     requestedAt: json['requested_at'] as String? ?? '',
   );
 }
@@ -70,6 +76,9 @@ class AssignmentModel {
   final double? estimatedCost;
   final double? finalCost;
   final String? performedServiceDescription;
+  final String? quotationStatus;
+  final String? quotationDescription;
+  final int? estimatedCompletionMinutes;
 
   const AssignmentModel({
     required this.id,
@@ -80,12 +89,19 @@ class AssignmentModel {
     this.estimatedCost,
     this.finalCost,
     this.performedServiceDescription,
+    this.quotationStatus,
+    this.quotationDescription,
+    this.estimatedCompletionMinutes,
   });
 
   bool get canPay =>
       assignmentStatus == 'ATENDIDO' || assignmentStatus == 'PENDIENTE_PAGO';
 
   bool get canRate => assignmentStatus == 'PAGADO';
+
+  bool get hasPendingQuote => quotationStatus == 'PENDIENTE';
+  bool get hasApprovedQuote => quotationStatus == 'APROBADO';
+  bool get hasRejectedQuote => quotationStatus == 'RECHAZADO';
 
   factory AssignmentModel.fromJson(Map<String, dynamic> json) =>
       AssignmentModel(
@@ -102,6 +118,76 @@ class AssignmentModel {
             : null,
         performedServiceDescription:
             json['performed_service_description'] as String?,
+        quotationStatus: json['quotation_status'] as String?,
+        quotationDescription: json['quotation_description'] as String?,
+        estimatedCompletionMinutes:
+            json['estimated_completion_minutes'] as int?,
+      );
+}
+
+// ---------------------------------------------------------------------------
+
+class AiAnalysisModel {
+  final int id;
+  final int incidentId;
+  final String? transcribedAudio;
+  final String? generatedSummary;
+  final String? predictedPriorityLevel;
+  final String? visibleDamageDetected;
+  final bool? predictedRequiresTow;
+  final double? confidenceScore;
+
+  const AiAnalysisModel({
+    required this.id, required this.incidentId,
+    this.transcribedAudio, this.generatedSummary,
+    this.predictedPriorityLevel, this.visibleDamageDetected,
+    this.predictedRequiresTow, this.confidenceScore,
+  });
+
+  factory AiAnalysisModel.fromJson(Map<String, dynamic> json) => AiAnalysisModel(
+    id: json['id'] as int,
+    incidentId: json['incident_id'] as int,
+    transcribedAudio: json['transcribed_audio'] as String?,
+    generatedSummary: json['generated_summary'] as String?,
+    predictedPriorityLevel: json['predicted_priority_level'] as String?,
+    visibleDamageDetected: json['visible_damage_detected'] as String?,
+    predictedRequiresTow: json['predicted_requires_tow'] as bool?,
+    confidenceScore: json['confidence_score'] != null ? (json['confidence_score'] as num).toDouble() : null,
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+class WorkshopCandidateModel {
+  final int id;
+  final int incidentId;
+  final int workshopId;
+  final double? score;
+  final double? distanceKm;
+  final int? estimatedArrivalMinutes;
+  final String responseStatus;
+
+  const WorkshopCandidateModel({
+    required this.id,
+    required this.incidentId,
+    required this.workshopId,
+    this.score,
+    this.distanceKm,
+    this.estimatedArrivalMinutes,
+    required this.responseStatus,
+  });
+
+  bool get isAccepted => responseStatus == 'ACEPTADO';
+
+  factory WorkshopCandidateModel.fromJson(Map<String, dynamic> json) =>
+      WorkshopCandidateModel(
+        id: json['id'] as int,
+        incidentId: json['incident_id'] as int,
+        workshopId: json['workshop_id'] as int,
+        score: json['score'] != null ? (json['score'] as num).toDouble() : null,
+        distanceKm: json['distance_km'] != null ? (json['distance_km'] as num).toDouble() : null,
+        estimatedArrivalMinutes: json['estimated_arrival_minutes'] as int?,
+        responseStatus: json['response_status'] as String? ?? '',
       );
 }
 

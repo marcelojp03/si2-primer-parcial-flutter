@@ -58,6 +58,11 @@ class _MainAppState extends ConsumerState<MainApp> {
       darkTheme: AppTheme.darkTheme(),
       themeMode: themeMode,
       routerConfig: appRouter,
+      builder: (context, child) => GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: child,
+      ),
     );
   }
 }

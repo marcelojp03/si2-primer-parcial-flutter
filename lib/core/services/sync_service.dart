@@ -16,17 +16,20 @@ class SyncService {
   SyncService(this._repo, this._incidentService);
 
   void startListening() {
-    _connectivitySub = Connectivity()
-        .onConnectivityChanged
-        .listen((results) {
-          final hasNet =
-              results.any((r) => r != ConnectivityResult.none);
-          if (hasNet) {
-            developer.log('🌐 Net recovered — syncing pending', name: 'SyncService');
-            syncPending();
-          }
-        });
-    developer.log('👂 SyncService listening for connectivity', name: 'SyncService');
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
+      final hasNet = results.any((r) => r != ConnectivityResult.none);
+      if (hasNet) {
+        developer.log(
+          '🌐 Net recovered — syncing pending',
+          name: 'SyncService',
+        );
+        syncPending();
+      }
+    });
+    developer.log(
+      '👂 SyncService listening for connectivity',
+      name: 'SyncService',
+    );
   }
 
   /// Procesa todos los incidentes PENDIENTE_SYNC contra el servidor.
@@ -86,8 +89,9 @@ final syncServiceProvider = Provider<SyncService>((ref) {
 });
 
 /// Provider reactivo que expone la cantidad de incidentes pendientes.
-final pendingIncidentsCountProvider =
-    StreamProvider.autoDispose<int>((ref) async* {
+final pendingIncidentsCountProvider = StreamProvider.autoDispose<int>((
+  ref,
+) async* {
   final repo = ref.read(localIncidentRepositoryProvider);
   // Emitir valor inicial
   yield await repo.pendingCount();

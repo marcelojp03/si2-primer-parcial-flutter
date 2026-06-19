@@ -26,13 +26,22 @@ class NotificationService {
     playSound: true,
   );
 
+  String? _fcmToken;
+
+  String? get fcmToken => _fcmToken;
+
   Future<void> init() async {
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
     await _requestPermissions();
     await _setupLocalNotifications();
     _setupMessageHandlers();
-    final token = await getToken();
-    developer.log('📱 FCM Token: $token', name: 'FCM');
+    _fcmToken = await getToken();
+    developer.log(
+      _fcmToken == null || _fcmToken!.isEmpty
+          ? '📱 FCM token unavailable'
+          : '📱 FCM token ready',
+      name: 'FCM',
+    );
   }
 
   Future<void> _requestPermissions() async {
@@ -133,5 +142,5 @@ class InAppBanner {
   final String title;
   final String message;
   final Function()? onTap;
-  _InAppBanner({required this.title, required this.message, this.onTap});
+  InAppBanner({required this.title, required this.message, this.onTap});
 }

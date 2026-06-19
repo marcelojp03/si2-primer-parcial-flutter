@@ -1,20 +1,25 @@
 import 'dart:async';
+import 'dart:io';
+
+import 'package:audioplayers/audioplayers.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 import 'package:si2_p1_mobile/core/models/local_incident_model.dart';
+import 'package:si2_p1_mobile/core/models/vehicle_model.dart';
 import 'package:si2_p1_mobile/core/services/incident_service.dart';
 import 'package:si2_p1_mobile/core/services/local_incident_repository.dart';
 import 'package:si2_p1_mobile/core/services/vehicle_service.dart';
-import 'package:si2_p1_mobile/core/models/vehicle_model.dart';
 import 'package:si2_p1_mobile/features/auth/providers/auth_provider.dart';
-import 'package:si2_p1_mobile/shared/widgets/custom_filled_button.dart';
-import 'package:si2_p1_mobile/shared/widgets/custom_input_field.dart';
 import 'package:si2_p1_mobile/shared/widgets/app_toast.dart';
+import 'package:si2_p1_mobile/shared/widgets/custom_filled_button.dart';
 
 class NewIncidentScreen extends ConsumerStatefulWidget {
   static const name = 'new-incident';
@@ -26,130 +31,399 @@ class NewIncidentScreen extends ConsumerStatefulWidget {
 }
 
 class _NewIncidentScreenState extends ConsumerState<NewIncidentScreen> {
-  final _pageCtrl = PageController();
-  int _page = 0;
+  static const _maxImages = 4;
+  static const _audioEncoder = AudioEncoder.wav;
+  static const _audioExtension = 'wav';
+  static const _audioMimeType = 'audio/wav';
+
+  final _descriptionCtrl = TextEditingController();
+  final _audioRecorder = AudioRecorder();
+  final _audioPlayer = AudioPlayer();
+  final _imagePicker = ImagePicker();
+  StreamSubscription<void>? _audioCompleteSub;
+  StreamSubscription<PlayerState>? _audioStateSub;
+  StreamSubscription<Duration>? _audioDurationSub;
+  StreamSubscription<String>? _audioLogSub;
+
   bool _isLoading = false;
-
-  // Step 1 — Descripción
-  final _titleCtrl = TextEditingController();
-  final _descCtrl = TextEditingController();
-
-  // Step 2 — Vehículo
+  bool _isSubmitting = false;
+  bool _isLoadingVehicles = false;
+  bool _isRecording = false;
+  bool _isPlayingAudio = false;
+  bool _requiresTow = false;
+  String _serviceModality = 'A_DOMICILIO';
   List<VehicleModel> _vehicles = [];
   VehicleModel? _selectedVehicle;
-
-  // Step 3 — GPS
+  int? _vehiclesLoadedForUserId;
   Position? _position;
-
-  // Step 4 — Evidencias
-  XFile? _photo;
+  final List<XFile> _images = [];
+  String? _audioPath;
+  String? _lastRequestedAudioPath;
 
   @override
   void initState() {
     super.initState();
+    _descriptionCtrl.addListener(_refreshSubmitState);
+    _audioCompleteSub = _audioPlayer.onPlayerComplete.listen(
+      (_) {
+        debugPrint('[EmergencyAudio] player complete');
+        if (mounted) setState(() => _isPlayingAudio = false);
+      },
+      onError: (Object error) {
+        debugPrint('[EmergencyAudio] player complete stream error=$error');
+      },
+    );
+    _audioStateSub = _audioPlayer.onPlayerStateChanged.listen(
+      (state) => debugPrint('[EmergencyAudio] player state=$state'),
+      onError: (Object error) {
+        debugPrint('[EmergencyAudio] player state stream error=$error');
+      },
+    );
+    _audioDurationSub = _audioPlayer.onDurationChanged.listen(
+      (duration) => debugPrint(
+        '[EmergencyAudio] player duration=${duration.inMilliseconds}ms',
+      ),
+      onError: (Object error) {
+        debugPrint('[EmergencyAudio] player duration stream error=$error');
+      },
+    );
+    _audioLogSub = _audioPlayer.onLog.listen(
+      (message) => debugPrint('[EmergencyAudio] player log=$message'),
+      onError: (Object error) {
+        debugPrint('[EmergencyAudio] player log stream error=$error');
+      },
+    );
     _loadVehicles();
   }
 
   @override
   void dispose() {
-    _pageCtrl.dispose();
-    _titleCtrl.dispose();
-    _descCtrl.dispose();
+    _descriptionCtrl.removeListener(_refreshSubmitState);
+    _descriptionCtrl.dispose();
+    _audioCompleteSub?.cancel();
+    _audioStateSub?.cancel();
+    _audioDurationSub?.cancel();
+    _audioLogSub?.cancel();
+    _audioRecorder.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
-  Future<void> _loadVehicles() async {
-    final userId = ref.read(authProvider).user?.id;
+  bool get _hasEmergencyInput =>
+      _descriptionCtrl.text.trim().isNotEmpty ||
+      (_audioPath != null && _audioPath!.isNotEmpty);
+
+  bool get _canSubmit =>
+      _hasEmergencyInput &&
+      _selectedVehicle != null &&
+      _position != null &&
+      !_isSubmitting;
+
+  String get _submitHelpText {
+    if (_isSubmitting) return 'Enviando emergencia...';
+
+    final missing = <String>[
+      if (!_hasEmergencyInput) 'descripcion o nota de voz',
+      if (_selectedVehicle == null) 'vehiculo',
+      if (_position == null) 'ubicacion',
+    ];
+    if (missing.isEmpty) {
+      return 'Listo para enviar. Puedes usar texto o nota de voz; imagenes son opcionales.';
+    }
+    return 'Falta: ${missing.join(', ')}.';
+  }
+
+  void _refreshSubmitState() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _loadVehicles({int? userId}) async {
+    userId ??= ref.read(authProvider).user?.id;
     if (userId == null) return;
+    if (_isLoadingVehicles || _vehiclesLoadedForUserId == userId) return;
+
     try {
+      setState(() => _isLoadingVehicles = true);
       final vehicles = await VehicleService().getMyVehicles(userId);
-      if (mounted) setState(() => _vehicles = vehicles);
-    } catch (_) {}
+      if (!mounted) return;
+      setState(() {
+        _vehicles = vehicles;
+        _selectedVehicle =
+            vehicles.any((vehicle) => vehicle.id == _selectedVehicle?.id)
+            ? _selectedVehicle
+            : null;
+        _vehiclesLoadedForUserId = userId;
+        _isLoadingVehicles = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isLoadingVehicles = false);
+      AppToast.error(context, message: 'No se pudieron cargar tus vehiculos');
+    }
   }
 
   Future<void> _getLocation() async {
     try {
-      LocationPermission perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied) {
-        perm = await Geolocator.requestPermission();
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
       }
-      if (perm == LocationPermission.deniedForever) {
-        if (mounted)
-          AppToast.error(
-            context,
-            message: 'Permiso de GPS denegado permanentemente',
-          );
+
+      if (permission == LocationPermission.deniedForever) {
+        if (!mounted) return;
+        AppToast.error(
+          context,
+          message: 'Permiso de ubicacion denegado permanentemente',
+        );
         return;
       }
-      setState(() => _isLoading = true);
-      final pos = await Geolocator.getCurrentPosition();
-      if (mounted)
-        setState(() {
-          _position = pos;
-          _isLoading = false;
-        });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        AppToast.error(context, message: 'Error al obtener ubicación');
+
+      if (permission == LocationPermission.denied) {
+        if (!mounted) return;
+        AppToast.warning(context, message: 'Necesitamos tu ubicacion actual');
+        return;
       }
+
+      setState(() => _isLoading = true);
+      final position = await Geolocator.getCurrentPosition();
+      if (!mounted) return;
+      setState(() {
+        _position = position;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      AppToast.error(context, message: 'Error al obtener ubicacion');
     }
   }
 
-  Future<void> _pickPhoto() async {
-    final picker = ImagePicker();
-    final img = await picker.pickImage(
+  Future<void> _toggleRecording() async {
+    if (_isRecording) {
+      await _stopRecording();
+      return;
+    }
+
+    final hasPermission = await _audioRecorder.hasPermission();
+    if (!hasPermission) {
+      if (!mounted) return;
+      AppToast.warning(context, message: 'Permiso de microfono requerido');
+      return;
+    }
+
+    if (_isPlayingAudio) {
+      debugPrint('[EmergencyAudio] stop before recording');
+      await _audioPlayer.stop();
+      if (mounted) setState(() => _isPlayingAudio = false);
+    }
+
+    final wavSupported = await _audioRecorder.isEncoderSupported(_audioEncoder);
+    debugPrint(
+      '[EmergencyAudio] encoder=${_audioEncoder.name} supported=$wavSupported',
+    );
+
+    final path =
+        '${Directory.systemTemp.path}${Platform.pathSeparator}'
+        'emergencia_${const Uuid().v4()}.$_audioExtension';
+    _lastRequestedAudioPath = path;
+    debugPrint('[EmergencyAudio] record.start requestedPath=$path');
+
+    await _audioRecorder.start(
+      const RecordConfig(encoder: _audioEncoder),
+      path: path,
+    );
+
+    if (!mounted) return;
+    setState(() => _isRecording = true);
+  }
+
+  Future<void> _stopRecording() async {
+    final path = await _audioRecorder.stop();
+    await _logRecordedAudio(path);
+    if (!mounted) return;
+    setState(() {
+      _isRecording = false;
+      if (path != null && path.isNotEmpty) _audioPath = path;
+    });
+  }
+
+  Future<void> _logRecordedAudio(String? returnedPath) async {
+    final requestedPath = _lastRequestedAudioPath;
+    final supported = await _audioRecorder.isEncoderSupported(_audioEncoder);
+    final extension = returnedPath == null
+        ? '<null>'
+        : returnedPath.split('.').last.toLowerCase();
+    final file = returnedPath == null ? null : File(returnedPath);
+    final exists = file?.existsSync() ?? false;
+    final bytes = exists ? file!.lengthSync() : 0;
+
+    debugPrint('[EmergencyAudio] record.stop returnedPath=$returnedPath');
+    debugPrint(
+      '[EmergencyAudio] record.requestedPath=$requestedPath '
+      'sameAsReturned=${requestedPath == returnedPath}',
+    );
+    debugPrint(
+      '[EmergencyAudio] record.file exists=$exists bytes=$bytes '
+      'extension=$extension encoder=${_audioEncoder.name} '
+      'supported=$supported',
+    );
+  }
+
+  Future<void> _toggleAudioPlayback() async {
+    final path = _audioPath;
+    if (path == null) return;
+    if (_isRecording) {
+      AppToast.warning(
+        context,
+        message: 'Deten la grabacion antes de escuchar',
+      );
+      return;
+    }
+
+    if (_isPlayingAudio) {
+      debugPrint(
+        '[EmergencyAudio] player stop requested state=${_audioPlayer.state}',
+      );
+      await _audioPlayer.stop();
+      if (mounted) setState(() => _isPlayingAudio = false);
+      return;
+    }
+
+    try {
+      final file = File(path);
+      final exists = file.existsSync();
+      final bytes = exists ? file.lengthSync() : 0;
+      debugPrint(
+        '[EmergencyAudio] play.start path=$path exists=$exists bytes=$bytes '
+        'stateBefore=${_audioPlayer.state}',
+      );
+      await _audioPlayer.play(
+        DeviceFileSource(path, mimeType: _audioMimeType),
+        volume: 1,
+        ctx: AudioContextConfig(route: AudioContextConfigRoute.speaker).build(),
+      );
+      final duration = await _audioPlayer.getDuration();
+      debugPrint(
+        '[EmergencyAudio] play.invoked state=${_audioPlayer.state} '
+        'durationMs=${duration?.inMilliseconds}',
+      );
+      if (mounted) setState(() => _isPlayingAudio = true);
+    } catch (error) {
+      debugPrint('[EmergencyAudio] play.error=$error');
+      if (!mounted) return;
+      setState(() => _isPlayingAudio = false);
+      AppToast.error(context, message: 'No se pudo reproducir la nota de voz');
+    }
+  }
+
+  void _clearAudio() {
+    debugPrint('[EmergencyAudio] clear audio stop state=${_audioPlayer.state}');
+    _audioPlayer.stop();
+    setState(() {
+      _audioPath = null;
+      _isPlayingAudio = false;
+    });
+  }
+
+  Future<void> _pickCameraImage() async {
+    if (_images.length >= _maxImages) {
+      AppToast.warning(context, message: 'Maximo $_maxImages imagenes');
+      return;
+    }
+
+    final image = await _imagePicker.pickImage(
       source: ImageSource.camera,
       imageQuality: 80,
     );
-    if (img != null && mounted) setState(() => _photo = img);
+    if (image == null || !mounted) return;
+    setState(() => _images.add(image));
+    debugPrint(
+      '[EmergencyEvidence] camera image selected count=${_images.length} '
+      'file=${_fileName(image.path)}',
+    );
+  }
+
+  Future<void> _pickGalleryImages() async {
+    final remaining = _maxImages - _images.length;
+    if (remaining <= 0) {
+      AppToast.warning(context, message: 'Maximo $_maxImages imagenes');
+      return;
+    }
+
+    final images = await _imagePicker.pickMultiImage(imageQuality: 80);
+    if (images.isEmpty || !mounted) return;
+    setState(() => _images.addAll(images.take(remaining)));
+    debugPrint(
+      '[EmergencyEvidence] gallery images selected added=${images.take(remaining).length} '
+      'count=${_images.length} files=${images.take(remaining).map((image) => _fileName(image.path)).join(', ')}',
+    );
+  }
+
+  void _removeImage(int index) {
+    setState(() => _images.removeAt(index));
   }
 
   Future<void> _submit() async {
+    if (_isRecording) {
+      await _stopRecording();
+    }
+
+    final description = _descriptionCtrl.text.trim();
+    final hasAudio = _audioPath != null && _audioPath!.isNotEmpty;
+    if (description.isEmpty && !hasAudio) {
+      AppToast.warning(
+        context,
+        message: 'Escribe una descripcion o graba una nota de voz',
+      );
+      return;
+    }
     if (_selectedVehicle == null) {
-      AppToast.warning(context, message: 'Selecciona un vehículo');
+      AppToast.warning(context, message: 'Selecciona tu vehiculo');
       return;
     }
     if (_position == null) {
-      AppToast.warning(context, message: 'Obtén tu ubicación primero');
+      AppToast.warning(context, message: 'Confirma tu ubicacion en el mapa');
       return;
     }
 
-    setState(() => _isLoading = true);
+    setState(() => _isSubmitting = true);
+
     final clientUserId = ref.read(authProvider).user?.id;
     if (clientUserId == null) {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isSubmitting = false);
       return;
     }
 
-    // Generar uuid_cliente para idempotencia offline
     final uuidCliente = const Uuid().v4();
-
-    // Verificar conectividad
+    final descriptionForRequest = description.isNotEmpty
+        ? description
+        : 'Emergencia enviada con nota de voz';
+    final title = description.isNotEmpty
+        ? _buildTitle(description)
+        : 'Emergencia por nota de voz';
     final connectivity = await Connectivity().checkConnectivity();
     final isOnline = connectivity.any((r) => r != ConnectivityResult.none);
 
     if (!isOnline) {
-      // Modo offline: guardar en Hive con PENDIENTE_SYNC
       final draft = LocalIncidentModel(
         uuid: uuidCliente,
-        title: _titleCtrl.text.trim(),
-        descriptionText: _descCtrl.text.trim(),
+        title: title,
+        descriptionText: descriptionForRequest,
         latitude: _position!.latitude,
         longitude: _position!.longitude,
         vehicleId: _selectedVehicle!.id,
         syncStatus: 'PENDIENTE_SYNC',
       );
       await LocalIncidentRepository().save(draft);
-      if (mounted) {
-        setState(() => _isLoading = false);
-        AppToast.info(
-          context,
-          message:
-              'Sin conexión. Emergencia guardada. Se enviará al recuperar red.',
-        );
-        context.go('/home');
-      }
+
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      AppToast.info(
+        context,
+        message:
+            'Sin conexion. Emergencia guardada; las evidencias no se adjuntan offline todavia.',
+      );
+      context.go('/home');
       return;
     }
 
@@ -158,183 +432,360 @@ class _NewIncidentScreenState extends ConsumerState<NewIncidentScreen> {
       final incident = await service.createIncident(
         clientUserId: clientUserId,
         vehicleId: _selectedVehicle!.id,
-        title: _titleCtrl.text.trim(),
-        descriptionText: _descCtrl.text.trim(),
+        title: title,
+        descriptionText: descriptionForRequest,
         latitude: _position!.latitude,
         longitude: _position!.longitude,
+        requiresTow: _requiresTow,
+        serviceModality: _serviceModality,
         uuidCliente: uuidCliente,
       );
 
-      if (_photo != null) {
-        await service.uploadEvidence(incident.id, _photo!.path, 'IMAGE');
+      try {
+        final imagePaths = _images.map((image) => image.path).toList();
+        debugPrint(
+          '[EmergencyEvidence] sending ai-analysis incident=${incident.id} '
+          'audio=${_audioPath != null} images=${imagePaths.length} '
+          'files=${imagePaths.map(_fileName).join(', ')}',
+        );
+        await service.analyzeIncident(
+          incident.id,
+          imagePaths: imagePaths,
+          audioPath: _audioPath,
+        );
+      } catch (_) {
+        if (mounted) {
+          AppToast.warning(
+            context,
+            message: 'Emergencia enviada; analisis IA pendiente',
+          );
+        }
       }
-
-      await service.analyzeIncident(incident.id);
 
       if (mounted) context.go('/incidents/${incident.id}/tracking');
     } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        AppToast.error(
-          context,
-          message: e.toString().replaceFirst('Exception: ', ''),
-        );
-      }
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      AppToast.error(
+        context,
+        message: e.toString().replaceFirst('Exception: ', ''),
+      );
     }
   }
 
-  void _nextPage() {
-    if (_page < 3) {
-      _pageCtrl.nextPage(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-      );
-      setState(() => _page++);
-    } else {
-      _submit();
-    }
+  String _buildTitle(String description) {
+    final normalized = description.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (normalized.length <= 80) return normalized;
+    return '${normalized.substring(0, 77)}...';
   }
 
-  void _prevPage() {
-    if (_page > 0) {
-      _pageCtrl.previousPage(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-      );
-      setState(() => _page--);
-    }
-  }
+  String _fileName(String path) => path.split(Platform.pathSeparator).last;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    const steps = ['Descripción', 'Vehículo', 'Ubicación', 'Evidencias'];
+    final authState = ref.watch(authProvider);
+    final authUserId = authState.user?.id;
+    final canSubmit = _canSubmit;
 
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        if (_page > 0) {
-          _prevPage();
-        } else if (context.canPop()) {
-          context.pop();
-        } else {
-          context.go('/home');
-        }
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Nueva Emergencia'),
-          leading: BackButton(
-            onPressed: () {
-              if (_page > 0) {
-                _prevPage();
-              } else if (context.canPop()) {
-                context.pop();
-              } else {
-                context.go('/home');
-              }
-            },
-          ),
+    if (authUserId != null &&
+        _vehiclesLoadedForUserId != authUserId &&
+        !_isLoadingVehicles) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _loadVehicles(userId: authUserId);
+      });
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Nueva emergencia'),
+        leading: BackButton(
+          onPressed: () {
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go('/home');
+            }
+          },
         ),
-        body: Column(
-          children: [
-            // Indicador de pasos
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              child: Row(
-                children: List.generate(steps.length, (i) {
-                  final isActive = i <= _page;
-                  return Expanded(
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Container(
-                            height: 4,
-                            decoration: BoxDecoration(
-                              color: isActive
-                                  ? theme.colorScheme.primary
-                                  : theme.colorScheme.surfaceVariant,
-                              borderRadius: BorderRadius.circular(2),
-                            ),
-                          ),
-                        ),
-                        if (i < steps.length - 1) const SizedBox(width: 4),
-                      ],
-                    ),
-                  );
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _SectionTitle(
+                icon: Icons.notes_rounded,
+                title: 'Describe el problema',
+                subtitle: 'Escribe lo necesario o deja una nota de voz.',
+              ),
+              const SizedBox(height: 10),
+              _DescriptionBox(
+                controller: _descriptionCtrl,
+                isRecording: _isRecording,
+                isPlayingAudio: _isPlayingAudio,
+                hasAudio: _audioPath != null,
+                onToggleRecording: _toggleRecording,
+                onPlayAudio: _audioPath == null ? null : _toggleAudioPlayback,
+                onClearAudio: _audioPath == null ? null : _clearAudio,
+              ),
+              const SizedBox(height: 22),
+
+              _SectionTitle(
+                icon: Icons.directions_car_rounded,
+                title: 'Vehiculo',
+                subtitle: 'Elige el vehiculo que necesita auxilio.',
+              ),
+              const SizedBox(height: 10),
+              _VehicleSelector(
+                vehicles: _vehicles,
+                isLoading:
+                    _isLoadingVehicles ||
+                    (authState.status == AuthStatus.checking &&
+                        _vehiclesLoadedForUserId == null),
+                selected: _selectedVehicle,
+                onChanged: (vehicle) => setState(() {
+                  _selectedVehicle = vehicle;
                 }),
               ),
-            ),
-            Text(
-              'Paso ${_page + 1}: ${steps[_page]}',
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: theme.colorScheme.primary,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 12),
+              const SizedBox(height: 22),
 
-            // Páginas
-            Expanded(
-              child: PageView(
-                controller: _pageCtrl,
-                physics: const NeverScrollableScrollPhysics(),
-                children: [
-                  _StepDescription(titleCtrl: _titleCtrl, descCtrl: _descCtrl),
-                  _StepVehicle(
-                    vehicles: _vehicles,
-                    selected: _selectedVehicle,
-                    onSelect: (v) => setState(() => _selectedVehicle = v),
-                  ),
-                  _StepLocation(
-                    position: _position,
-                    isLoading: _isLoading,
-                    onGetLocation: _getLocation,
-                  ),
-                  _StepEvidences(photo: _photo, onPickPhoto: _pickPhoto),
-                ],
+              _SectionTitle(
+                icon: Icons.photo_camera_rounded,
+                title: 'Imagenes para diagnostico IA',
+                subtitle: 'Agrega fotos claras del incidente si puedes.',
               ),
-            ),
+              const SizedBox(height: 10),
+              _EvidencePicker(
+                images: _images,
+                onCamera: _pickCameraImage,
+                onGallery: _pickGalleryImages,
+                onRemove: _removeImage,
+                fileName: _fileName,
+              ),
+              const SizedBox(height: 16),
 
-            Padding(
-              padding: const EdgeInsets.all(20),
-              child: CustomFilledButton(
-                text: _page < 3 ? 'Siguiente' : 'Enviar emergencia',
-                isLoading: _isLoading && _page == 3,
-                onPressed: _nextPage,
+              // ── Modalidad de servicio ────────────────────────────
+              _SectionTitle(
+                icon: Icons.route_rounded,
+                title: 'Tipo de servicio',
+                subtitle: 'Elige como quieres recibir la asistencia.',
               ),
-            ),
-          ],
+              const SizedBox(height: 8),
+              Container(
+                decoration: BoxDecoration(
+                  border: Border.all(color: theme.colorScheme.outlineVariant),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  children: [
+                    RadioListTile<String>(
+                      title: const Text('Que vengan a mi ubicación'),
+                      subtitle: const Text('Un técnico o grúa irá hacia donde estás.'),
+                      value: 'A_DOMICILIO',
+                      groupValue: _serviceModality,
+                      onChanged: (v) { if (v != null) setState(() => _serviceModality = v); },
+                    ),
+                    const Divider(height: 1, indent: 16, endIndent: 16),
+                    RadioListTile<String>(
+                      title: const Text('Yo iré al taller'),
+                      subtitle: const Text('El problema es leve y puedo conducir hasta el taller.'),
+                      value: 'CLIENTE_VE_TALLER',
+                      groupValue: _serviceModality,
+                      onChanged: (v) { if (v != null) setState(() => _serviceModality = v); },
+                    ),
+                  ],
+                ),
+              ),
+              if (_serviceModality == 'A_DOMICILIO') ...[
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  title: const Text('Requiere remolque / grúa'),
+                  subtitle: const Text('El vehículo no puede moverse por sí mismo.'),
+                  value: _requiresTow,
+                  onChanged: (v) => setState(() => _requiresTow = v ?? false),
+                  controlAffinity: ListTileControlAffinity.trailing,
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                ),
+              ],
+              const SizedBox(height: 22),
+
+              _SectionTitle(
+                icon: Icons.location_on_rounded,
+                title: 'Ubicacion',
+                subtitle: _serviceModality == 'CLIENTE_VE_TALLER'
+                    ? 'Tu ubicación actual para buscar talleres cercanos.'
+                    : 'Confirma donde debe llegar el taller.',
+              ),
+              const SizedBox(height: 10),
+              _LocationPicker(
+                position: _position,
+                isLoading: _isLoading,
+                onGetLocation: _getLocation,
+              ),
+              const SizedBox(height: 28),
+              CustomFilledButton(
+                text: 'Enviar emergencia',
+                icon: Icons.send_rounded,
+                isLoading: _isSubmitting,
+                isEnabled: canSubmit,
+                onPressed: canSubmit ? _submit : null,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _submitHelpText,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
         ),
-      ), // Scaffold
-    ); // PopScope
+      ),
+    );
   }
 }
 
-class _StepDescription extends StatelessWidget {
-  final TextEditingController titleCtrl;
-  final TextEditingController descCtrl;
+class _SectionTitle extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
 
-  const _StepDescription({required this.titleCtrl, required this.descCtrl});
+  const _SectionTitle({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: theme.colorScheme.primary),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DescriptionBox extends StatelessWidget {
+  final TextEditingController controller;
+  final bool isRecording;
+  final bool isPlayingAudio;
+  final bool hasAudio;
+  final VoidCallback onToggleRecording;
+  final VoidCallback? onPlayAudio;
+  final VoidCallback? onClearAudio;
+
+  const _DescriptionBox({
+    required this.controller,
+    required this.isRecording,
+    required this.isPlayingAudio,
+    required this.hasAudio,
+    required this.onToggleRecording,
+    required this.onPlayAudio,
+    required this.onClearAudio,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final audioColor = isRecording
+        ? theme.colorScheme.error
+        : theme.colorScheme.primary;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        borderRadius: BorderRadius.circular(8),
+      ),
       child: Column(
         children: [
-          CustomInputField(
-            label: 'Título del problema',
-            controller: titleCtrl,
-            prefixIcon: Icons.title_rounded,
+          TextField(
+            controller: controller,
+            minLines: 5,
+            maxLines: 7,
+            textInputAction: TextInputAction.newline,
+            decoration: const InputDecoration(
+              hintText: 'Ej.: Se pincho una llanta y estoy detenido en la via.',
+              border: InputBorder.none,
+              contentPadding: EdgeInsets.fromLTRB(14, 14, 14, 8),
+            ),
           ),
-          const SizedBox(height: 16),
-          CustomInputField(
-            label: 'Descripción detallada',
-            controller: descCtrl,
-            maxLines: 4,
-            prefixIcon: Icons.description_outlined,
+          Divider(height: 1, color: theme.colorScheme.outlineVariant),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: isRecording ? 'Detener audio' : 'Grabar audio',
+                  onPressed: onToggleRecording,
+                  icon: Icon(
+                    isRecording ? Icons.stop_rounded : Icons.mic_rounded,
+                    color: audioColor,
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    isRecording
+                        ? 'Grabando nota de voz...'
+                        : isPlayingAudio
+                        ? 'Reproduciendo nota de voz...'
+                        : hasAudio
+                        ? 'Nota de voz lista para analisis IA'
+                        : 'Puedes agregar una nota de voz',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: hasAudio || isRecording
+                          ? audioColor
+                          : theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                if (hasAudio && !isRecording)
+                  IconButton(
+                    tooltip: isPlayingAudio
+                        ? 'Detener reproduccion'
+                        : 'Escuchar audio',
+                    onPressed: onPlayAudio,
+                    icon: Icon(
+                      isPlayingAudio
+                          ? Icons.stop_circle_rounded
+                          : Icons.play_circle_rounded,
+                    ),
+                  ),
+                if (hasAudio && !isRecording)
+                  IconButton(
+                    tooltip: 'Quitar audio',
+                    onPressed: onClearAudio,
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+              ],
+            ),
           ),
         ],
       ),
@@ -342,57 +793,187 @@ class _StepDescription extends StatelessWidget {
   }
 }
 
-class _StepVehicle extends StatelessWidget {
+class _VehicleSelector extends StatelessWidget {
   final List<VehicleModel> vehicles;
+  final bool isLoading;
   final VehicleModel? selected;
-  final ValueChanged<VehicleModel> onSelect;
+  final ValueChanged<VehicleModel?> onChanged;
 
-  const _StepVehicle({
+  const _VehicleSelector({
     required this.vehicles,
+    required this.isLoading,
     required this.selected,
-    required this.onSelect,
+    required this.onChanged,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (vehicles.isEmpty) {
-      return const Center(
-        child: Text(
-          'No tienes vehículos registrados.\nAgrega uno en "Mis Vehículos".',
+    final theme = Theme.of(context);
+
+    if (isLoading) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          border: Border.all(color: theme.colorScheme.outlineVariant),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 10),
+            Expanded(child: Text('Cargando tus vehiculos...')),
+          ],
         ),
       );
     }
-    return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      itemCount: vehicles.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 8),
-      itemBuilder: (_, i) {
-        final v = vehicles[i];
-        final isSelected = selected?.id == v.id;
-        return ListTile(
-          tileColor: isSelected
-              ? Theme.of(context).colorScheme.primaryContainer
-              : null,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+
+    if (vehicles.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          border: Border.all(color: theme.colorScheme.outlineVariant),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.info_outline_rounded),
+            SizedBox(width: 10),
+            Expanded(child: Text('No tienes vehiculos registrados.')),
+          ],
+        ),
+      );
+    }
+
+    return DropdownButtonFormField<VehicleModel>(
+      initialValue: selected,
+      isExpanded: true,
+      decoration: const InputDecoration(
+        prefixIcon: Icon(Icons.directions_car_rounded),
+        border: OutlineInputBorder(),
+        labelText: 'Selecciona tu vehiculo',
+      ),
+      items: vehicles.map((vehicle) {
+        return DropdownMenuItem(
+          value: vehicle,
+          child: Text(
+            '${vehicle.brand} ${vehicle.model} - ${vehicle.plate}',
+            overflow: TextOverflow.ellipsis,
           ),
-          leading: const Icon(Icons.directions_car_rounded),
-          title: Text('${v.brand} ${v.model}'),
-          subtitle: Text(v.plate),
-          trailing: isSelected ? const Icon(Icons.check_circle_rounded) : null,
-          onTap: () => onSelect(v),
         );
-      },
+      }).toList(),
+      onChanged: onChanged,
     );
   }
 }
 
-class _StepLocation extends StatelessWidget {
+class _EvidencePicker extends StatelessWidget {
+  final List<XFile> images;
+  final VoidCallback onCamera;
+  final VoidCallback onGallery;
+  final ValueChanged<int> onRemove;
+  final String Function(String path) fileName;
+
+  const _EvidencePicker({
+    required this.images,
+    required this.onCamera,
+    required this.onGallery,
+    required this.onRemove,
+    required this.fileName,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: onCamera,
+                icon: const Icon(Icons.camera_alt_rounded),
+                label: const Text('Camara'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: onGallery,
+                icon: const Icon(Icons.photo_library_rounded),
+                label: const Text('Galeria'),
+              ),
+            ),
+          ],
+        ),
+        if (images.isEmpty) ...[
+          const SizedBox(height: 10),
+          Text(
+            'Opcional, pero ayuda a clasificar el incidente.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ] else ...[
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 92,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: images.length,
+              separatorBuilder: (context, index) => const SizedBox(width: 10),
+              itemBuilder: (context, index) {
+                final image = images[index];
+                return SizedBox(
+                  width: 92,
+                  child: Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.file(
+                          File(image.path),
+                          width: 92,
+                          height: 92,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: IconButton.filled(
+                          constraints: const BoxConstraints.tightFor(
+                            width: 30,
+                            height: 30,
+                          ),
+                          padding: EdgeInsets.zero,
+                          tooltip: 'Quitar ${fileName(image.path)}',
+                          onPressed: () => onRemove(index),
+                          icon: const Icon(Icons.close_rounded, size: 18),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _LocationPicker extends StatelessWidget {
   final Position? position;
   final bool isLoading;
   final VoidCallback onGetLocation;
 
-  const _StepLocation({
+  const _LocationPicker({
     required this.position,
     required this.isLoading,
     required this.onGetLocation,
@@ -400,92 +981,97 @@ class _StepLocation extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.location_on_rounded,
-            size: 64,
-            color: position != null
-                ? Colors.green
-                : Theme.of(context).colorScheme.primary,
-          ),
-          const SizedBox(height: 16),
-          if (position != null) ...[
-            Text(
-              'Ubicación obtenida',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.bold,
-                color: Colors.green,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Lat: ${position!.latitude.toStringAsFixed(6)}\nLng: ${position!.longitude.toStringAsFixed(6)}',
-              textAlign: TextAlign.center,
-            ),
-          ] else
-            const Text('Presiona el botón para obtener tu ubicación actual.'),
-          const SizedBox(height: 24),
-          CustomFilledButton(
-            text: position != null
-                ? 'Actualizar ubicación'
-                : 'Obtener ubicación GPS',
-            isLoading: isLoading,
-            onPressed: onGetLocation,
-            icon: Icons.my_location_rounded,
-            buttonColor: position != null ? Colors.green : null,
-          ),
-        ],
-      ),
-    );
-  }
-}
+    final theme = Theme.of(context);
+    final current = position == null
+        ? null
+        : LatLng(position!.latitude, position!.longitude);
 
-class _StepEvidences extends StatelessWidget {
-  final XFile? photo;
-  final VoidCallback onPickPhoto;
-
-  const _StepEvidences({required this.photo, required this.onPickPhoto});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.photo_camera_rounded,
-            size: 64,
-            color: photo != null
-                ? Colors.green
-                : Theme.of(context).colorScheme.primary,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: SizedBox(
+            height: 190,
+            child: current == null
+                ? ColoredBox(
+                    color: theme.colorScheme.surfaceContainerHighest,
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.map_outlined,
+                            size: 42,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Tu ubicacion aparecera aqui',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : FlutterMap(
+                    options: MapOptions(
+                      initialCenter: current,
+                      initialZoom: 16,
+                    ),
+                    children: [
+                      TileLayer(
+                        urlTemplate:
+                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        userAgentPackageName: 'si2_p1_mobile',
+                      ),
+                      MarkerLayer(
+                        markers: [
+                          Marker(
+                            point: current,
+                            width: 46,
+                            height: 46,
+                            child: Icon(
+                              Icons.location_on_rounded,
+                              size: 46,
+                              color: theme.colorScheme.primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
           ),
-          const SizedBox(height: 16),
+        ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: isLoading ? null : onGetLocation,
+          icon: isLoading
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.my_location_rounded),
+          label: Text(
+            current == null
+                ? 'Usar mi ubicacion actual'
+                : 'Actualizar ubicacion',
+          ),
+        ),
+        if (current != null) ...[
+          const SizedBox(height: 6),
           Text(
-            photo != null ? 'Foto tomada' : 'Foto (opcional)',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            photo != null
-                ? photo!.name
-                : 'Toma una foto del problema para acelerar el diagnóstico.',
+            'Lat ${current.latitude.toStringAsFixed(6)} - Lng ${current.longitude.toStringAsFixed(6)}',
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 24),
-          CustomFilledButton(
-            text: photo != null ? 'Cambiar foto' : 'Tomar foto',
-            onPressed: onPickPhoto,
-            icon: Icons.camera_alt_rounded,
-            buttonColor: photo != null ? Colors.green : null,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
         ],
-      ),
+      ],
     );
   }
 }

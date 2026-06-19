@@ -11,6 +11,8 @@ import 'package:si2_p1_mobile/features/payments/screens/payment_screen.dart';
 import 'package:si2_p1_mobile/features/payments/screens/qr_payment_screen.dart';
 import 'package:si2_p1_mobile/features/profile/screens/profile_screen.dart';
 import 'package:si2_p1_mobile/features/splash/screens/splash_screen.dart';
+import 'package:si2_p1_mobile/features/technician/screens/technician_home_screen.dart';
+import 'package:si2_p1_mobile/features/technician/screens/technician_assignment_screen.dart';
 import 'package:si2_p1_mobile/config/layout/app_shell.dart';
 
 final appRouter = GoRouter(
@@ -57,6 +59,22 @@ final appRouter = GoRouter(
           builder: (context, state) => const ProfileScreen(),
         ),
       ],
+    ),
+
+    // Pantallas de técnico
+    GoRoute(
+      path: '/technician/home',
+      name: TechnicianHomeScreen.name,
+      builder: (context, state) => const TechnicianHomeScreen(),
+    ),
+    GoRoute(
+      path: '/technician/assignment/:assignmentId',
+      name: TechnicianAssignmentScreen.name,
+      builder: (context, state) {
+        final assignmentId = int.parse(state.pathParameters['assignmentId']!);
+        final incidentId = int.tryParse(state.uri.queryParameters['incidentId'] ?? '') ?? assignmentId;
+        return TechnicianAssignmentScreen(assignmentId: assignmentId, incidentId: incidentId);
+      },
     ),
 
     // Pantallas fuera del shell

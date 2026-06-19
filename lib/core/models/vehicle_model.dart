@@ -7,6 +7,7 @@ class VehicleModel {
   final int manufactureYear;
   final String color;
   final String? notes;
+  final String? photoUrl;
   final String status;
 
   const VehicleModel({
@@ -19,6 +20,7 @@ class VehicleModel {
     required this.color,
     required this.status,
     this.notes,
+    this.photoUrl,
   });
 
   bool get isActive => status.toUpperCase() == 'ACTIVO';
@@ -32,6 +34,7 @@ class VehicleModel {
     manufactureYear: json['manufacture_year'] as int,
     color: json['color'] as String? ?? '',
     notes: json['notes'] as String?,
+    photoUrl: json['photo_url'] as String?,
     status: json['status'] as String? ?? 'ACTIVO',
   );
 
@@ -43,5 +46,6 @@ class VehicleModel {
     'color': color,
     'status': status,
     if (notes != null) 'notes': notes,
+    if (photoUrl != null) 'photo_url': photoUrl,
   };
 }

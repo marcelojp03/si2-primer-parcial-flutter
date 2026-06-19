@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:si2_p1_mobile/core/api/api_client.dart';
 import 'package:si2_p1_mobile/core/api/api_exceptions.dart';
 import 'package:si2_p1_mobile/core/models/incident_model.dart';
@@ -15,6 +16,7 @@ class IncidentService {
     required double latitude,
     required double longitude,
     bool requiresTow = false,
+    String serviceModality = 'A_DOMICILIO',
     String? referenceAddress,
     String? uuidCliente,
   }) async {
@@ -29,6 +31,7 @@ class IncidentService {
           'latitude': latitude,
           'longitude': longitude,
           'requires_tow': requiresTow,
+          'service_modality': serviceModality,
           if (referenceAddress != null) 'reference_address': referenceAddress,
           if (uuidCliente != null) 'uuid_cliente': uuidCliente,
         },
@@ -117,9 +120,42 @@ class IncidentService {
     }
   }
 
-  Future<void> analyzeIncident(int incidentId) async {
+  Future<void> analyzeIncident(
+    int incidentId, {
+    List<String> imagePaths = const [],
+    String? audioPath,
+  }) async {
     try {
-      await _client.post('/ai-analysis/$incidentId');
+      final hasImages = imagePaths.isNotEmpty;
+      final hasAudio = audioPath != null && audioPath.isNotEmpty;
+      debugPrint(
+        '[IncidentService] ai-analysis incident=$incidentId '
+        'audio=$hasAudio images=${imagePaths.length} '
+        'files=${imagePaths.map((path) => path.split(RegExp(r'[\\\\/]')).last).join(', ')}',
+      );
+
+      if (!hasImages && !hasAudio) {
+        await _client.post('/ai-analysis/$incidentId');
+        return;
+      }
+
+      final formData = FormData();
+      if (hasAudio) {
+        formData.files.add(
+          MapEntry('audio', await MultipartFile.fromFile(audioPath)),
+        );
+      }
+      for (final path in imagePaths) {
+        formData.files.add(
+          MapEntry('images', await MultipartFile.fromFile(path)),
+        );
+      }
+
+      await _client.post(
+        '/ai-analysis/$incidentId',
+        data: formData,
+        options: Options(contentType: 'multipart/form-data'),
+      );
     } on DioException catch (e) {
       throw ApiException.fromDioError(e);
     }
@@ -127,7 +163,15 @@ class IncidentService {
 
   Future<AssignmentModel?> getAssignment(int incidentId) async {
     try {
-      final response = await _client.get('/assignments/$incidentId');
+      final response = await _client.get(
+        '/assignments/$incidentId',
+        options: Options(
+          validateStatus: (status) =>
+              status != null &&
+              (status >= 200 && status < 300 || status == 404),
+        ),
+      );
+      if (response.statusCode == 404) return null;
       return AssignmentModel.fromJson(response.data as Map<String, dynamic>);
     } on DioException catch (e) {
       if (e.response?.statusCode == 404) return null;
@@ -197,6 +241,83 @@ class IncidentService {
     try {
       final response = await _client.get('/payments/$paymentId/qr-status');
       return QRStatusResponse.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<IncidentModel?> cancelIncident(int incidentId) async {
+    try {
+      final response = await _client.post('/incidents/$incidentId/cancel');
+      return IncidentModel.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<AiAnalysisModel?> getAiAnalysis(int incidentId) async {
+    try {
+      final response = await _client.get('/ai-analysis/$incidentId');
+      return AiAnalysisModel.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) return null;
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<List<AssignmentModel>> getTechnicianAssignments() async {
+    try {
+      final response = await _client.get('/technicians/me/assignments');
+      final list = response.data as List<dynamic>;
+      return list.map((e) => AssignmentModel.fromJson(e as Map<String, dynamic>)).toList();
+    } on DioException catch (e) {
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<AssignmentModel> updateAssignment(int assignmentId, Map<String, dynamic> data) async {
+    try {
+      final response = await _client.patch('/assignments/$assignmentId/status', data: data);
+      return AssignmentModel.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<void> updateLocation(int incidentId, double lat, double lng) async {
+    try {
+      await _client.post('/incidents/$incidentId/locations', data: {'latitude': lat, 'longitude': lng});
+    } on DioException catch (e) {
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<List<WorkshopCandidateModel>> getAcceptedCandidates(int incidentId) async {
+    try {
+      final response = await _client.get('/assignments/$incidentId/accepted-candidates');
+      final list = response.data as List<dynamic>;
+      return list.map((e) => WorkshopCandidateModel.fromJson(e as Map<String, dynamic>)).toList();
+    } on DioException catch (e) {
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<AssignmentModel> selectWorkshop(int incidentId, int workshopId) async {
+    try {
+      final response = await _client.post('/assignments/$incidentId/select-workshop/$workshopId');
+      return AssignmentModel.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioError(e);
+    }
+  }
+
+  Future<AssignmentModel?> respondQuote(int assignmentId, String status) async {
+    try {
+      final response = await _client.patch(
+        '/assignments/$assignmentId/quote/respond',
+        data: {'status': status},
+      );
+      return AssignmentModel.fromJson(response.data as Map<String, dynamic>);
     } on DioException catch (e) {
       throw ApiException.fromDioError(e);
     }

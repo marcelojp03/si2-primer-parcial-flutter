@@ -10,6 +10,10 @@ class Responsive {
   final bool isDesktop;
   final bool isPortrait;
 
+  // Design reference: iPhone X (375×812, diagonal ~894)
+  static const double _designWidth = 375;
+  static const double _designDiagonal = 894;
+
   factory Responsive.of(BuildContext context) {
     final size = MediaQuery.of(context).size;
     final diagonal = math.sqrt(
@@ -41,13 +45,22 @@ class Responsive {
   double hp(double percent) => height * percent / 100;
   double dp(double percent) => diagonal * percent / 100;
 
+  double px(double designPixels) => designPixels * (width / _designWidth);
+
+  double pxToDp(double designPixels) =>
+      dp(designPixels / _designDiagonal * 100);
+
   double fontSize(double size) {
     if (isDesktop) return size * 1.2;
     if (isTablet) return size * 1.1;
-    return size;
+    return px(size).clamp(size * 0.8, size * 1.3);
   }
 
-  double spacing(double size) => isTablet ? size * 1.2 : size;
+  double iconSize(double size) {
+    return px(size).clamp(size * 0.85, size * 1.25);
+  }
+
+  double spacing(double size) => isTablet ? size * 1.2 : px(size);
   double radius(double r) => isTablet ? r * 1.1 : r;
 }
 

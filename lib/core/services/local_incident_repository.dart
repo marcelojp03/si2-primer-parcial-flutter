@@ -68,9 +68,7 @@ class LocalIncidentRepository {
   /// Cantidad de incidentes pendientes de sync.
   Future<int> pendingCount() async {
     final box = await _openBox();
-    return box.values
-        .where((m) => m['sync_status'] == 'PENDIENTE_SYNC')
-        .length;
+    return box.values.where((m) => m['sync_status'] == 'PENDIENTE_SYNC').length;
   }
 
   /// Abre el box al iniciar la app (llamar desde main.dart).
@@ -79,6 +77,8 @@ class LocalIncidentRepository {
   }
 }
 
-final localIncidentRepositoryProvider = Provider<LocalIncidentRepository>((ref) {
+final localIncidentRepositoryProvider = Provider<LocalIncidentRepository>((
+  ref,
+) {
   return LocalIncidentRepository();
 });

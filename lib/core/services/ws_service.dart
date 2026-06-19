@@ -20,6 +20,10 @@ class WsService {
   Timer? _reconnectTimer;
   int _reconnectAttempts = 0;
   bool _disposed = false;
+  bool _connecting = false;
+  bool _isConnected = false;
+  bool _authFailure = false;
+  int? _activeIncidentId;
 
   final _controller = StreamController<Map<String, dynamic>>.broadcast();
 
@@ -33,6 +37,9 @@ class WsService {
   /// Conecta al WS usando el JWT guardado en SecureStorage.
   Future<void> connect() async {
     if (_disposed) return;
+    if (_connecting || _isConnected) return;
+    if (_authFailure) return;
+
     final token = await SecureStorageService().getToken();
     if (token == null || token.isEmpty) return;
 
@@ -44,16 +51,18 @@ class WsService {
         .replaceFirst('http://', 'ws://');
     final uri = Uri.parse('$wsBase/ws?token=$token');
 
-    developer.log('🔌 WS connecting: $uri', name: 'WsService');
+    developer.log(
+      '🔌 WS connecting: ${_redactSensitive(uri.toString())}',
+      name: 'WsService',
+    );
+    _connecting = true;
     try {
       _channel = WebSocketChannel.connect(uri);
-      _reconnectAttempts = 0;
-      _startHeartbeat();
-
       _sub = _channel!.stream.listen(
         (data) {
           try {
             final msg = jsonDecode(data as String) as Map<String, dynamic>;
+            _markConnected();
             // Responder a ping del servidor
             if (msg['type'] == 'ping') {
               send({'type': 'pong'});
@@ -63,13 +72,18 @@ class WsService {
             if (!_controller.isClosed) _controller.add(msg);
           } catch (_) {}
         },
-        onError: (_) => _scheduleReconnect(),
-        onDone: () => _scheduleReconnect(),
+        onError: (error) => _handleSocketError(error),
+        onDone: _handleSocketDone,
         cancelOnError: false,
       );
+
+      await _channel!.ready.timeout(const Duration(seconds: 10));
+      if (_disposed) return;
+      _markConnected();
     } catch (e) {
-      developer.log('❌ WS connect error: $e', name: 'WsService');
-      _scheduleReconnect();
+      _handleConnectFailure(e);
+    } finally {
+      _connecting = false;
     }
   }
 
@@ -80,25 +94,54 @@ class WsService {
     } catch (_) {}
   }
 
+  void subscribeIncident(int incidentId) {
+    _activeIncidentId = incidentId;
+    if (_isConnected) {
+      _sendSubscribeIncident(incidentId);
+    } else {
+      developer.log(
+        '📡 WS subscribe pending incident:$incidentId',
+        name: 'WsService',
+      );
+    }
+  }
+
+  void unsubscribeIncident(int incidentId) {
+    if (_activeIncidentId == incidentId) {
+      _activeIncidentId = null;
+    }
+    if (_isConnected) {
+      send({'type': 'unsubscribe_incident', 'incident_id': incidentId});
+    }
+    developer.log('📴 WS unsubscribe incident:$incidentId', name: 'WsService');
+  }
+
   /// Cierra la conexión definitivamente (al hacer logout).
   void close() {
     _disposed = true;
+    _connecting = false;
+    _authFailure = false;
     _heartbeatTimer?.cancel();
     _reconnectTimer?.cancel();
     _sub?.cancel();
     _channel?.sink.close();
     _channel = null;
+    _isConnected = false;
+    _activeIncidentId = null;
   }
 
   /// Reinicia para una nueva sesión (al hacer login de nuevo).
   void reset() {
     _disposed = false;
+    _connecting = false;
+    _authFailure = false;
     _reconnectAttempts = 0;
     _heartbeatTimer?.cancel();
     _reconnectTimer?.cancel();
     _sub?.cancel();
     _channel?.sink.close();
     _channel = null;
+    _isConnected = false;
   }
 
   void _startHeartbeat() {
@@ -110,9 +153,11 @@ class WsService {
 
   void _scheduleReconnect() {
     if (_disposed) return;
+    if (_authFailure) return;
     _heartbeatTimer?.cancel();
     _sub?.cancel();
     _channel = null;
+    _isConnected = false;
 
     final delay = min(pow(2, _reconnectAttempts).toInt(), 30);
     _reconnectAttempts++;
@@ -122,6 +167,87 @@ class WsService {
     );
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(Duration(seconds: delay), connect);
+  }
+
+  void _markConnected() {
+    if (_isConnected) return;
+    _isConnected = true;
+    _authFailure = false;
+    _reconnectAttempts = 0;
+    _startHeartbeat();
+    _resubscribeActiveIncident();
+  }
+
+  void _handleConnectFailure(Object error) {
+    _heartbeatTimer?.cancel();
+    _sub?.cancel();
+    _channel = null;
+    _isConnected = false;
+
+    final message = _redactSensitive('$error');
+    if (_looksLikeAuthFailure(error)) {
+      _authFailure = true;
+      developer.log(
+        '🔒 WS auth failed; reconnect disabled: $message',
+        name: 'WsService',
+      );
+      return;
+    }
+
+    developer.log('❌ WS connect error: $message', name: 'WsService');
+    _scheduleReconnect();
+  }
+
+  void _handleSocketError(Object error) {
+    final message = _redactSensitive('$error');
+    if (_looksLikeAuthFailure(error)) {
+      _authFailure = true;
+      _heartbeatTimer?.cancel();
+      _reconnectTimer?.cancel();
+      _sub?.cancel();
+      _channel = null;
+      _isConnected = false;
+      developer.log(
+        '🔒 WS closed by auth error; reconnect disabled: $message',
+        name: 'WsService',
+      );
+      return;
+    }
+
+    developer.log('❌ WS stream error: $message', name: 'WsService');
+    _scheduleReconnect();
+  }
+
+  void _handleSocketDone() {
+    if (_authFailure || _disposed) return;
+    _scheduleReconnect();
+  }
+
+  bool _looksLikeAuthFailure(Object error) {
+    final value = '$error'.toLowerCase();
+    return value.contains('401') ||
+        value.contains('403') ||
+        value.contains('unauthorized') ||
+        value.contains('forbidden') ||
+        value.contains('expired') ||
+        value.contains('invalid token') ||
+        value.contains('was not upgraded to websocket');
+  }
+
+  void _resubscribeActiveIncident() {
+    final incidentId = _activeIncidentId;
+    if (incidentId != null) {
+      _sendSubscribeIncident(incidentId);
+    }
+  }
+
+  void _sendSubscribeIncident(int incidentId) {
+    send({'type': 'subscribe_incident', 'incident_id': incidentId});
+    developer.log('📡 WS subscribe incident:$incidentId', name: 'WsService');
+  }
+
+  String _redactSensitive(String value) {
+    return value.replaceAll(RegExp(r'token=[^&\s]+'), 'token=<REDACTED>');
   }
 }
 

@@ -16,6 +16,13 @@ class Env {
     seconds: int.tryParse(dotenv.env['RECEIVE_TIMEOUT'] ?? '60') ?? 60,
   );
 
+  // Routing providers
+  static String get osrmBaseUrl =>
+      dotenv.env['OSRM_BASE_URL'] ?? 'https://router.project-osrm.org';
+
+  static String get orsApiKey =>
+      dotenv.env['ORS_API_KEY'] ?? '';
+
   // Claves para SecureStorage
   static const String tokenKey = 'access_token';
   static const String userKey = 'user_data';

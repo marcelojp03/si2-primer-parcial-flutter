@@ -3,6 +3,7 @@ import 'package:dio/dio.dart';
 class ApiException implements Exception {
   final int? statusCode;
   final String message;
+
   /// ID del recurso existente (presente en respuesta 409).
   final int? existingId;
 
@@ -39,7 +40,11 @@ class ApiException implements Exception {
       existingId = data['id'] as int?;
     }
 
-    return ApiException(statusCode: status, message: message, existingId: existingId);
+    return ApiException(
+      statusCode: status,
+      message: message,
+      existingId: existingId,
+    );
   }
 
   @override

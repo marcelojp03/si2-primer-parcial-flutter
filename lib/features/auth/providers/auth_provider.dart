@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:si2_p1_mobile/core/api/api_exceptions.dart';
 import 'package:si2_p1_mobile/core/models/user_model.dart';
 import 'package:si2_p1_mobile/core/services/auth_service.dart';
+import 'package:si2_p1_mobile/core/services/ws_service.dart';
 
 enum AuthStatus { checking, authenticated, notAuthenticated }
 
@@ -39,9 +41,15 @@ class AuthNotifier extends StateNotifier<AuthState> {
       try {
         final user = await _service.getProfile();
         state = state.copyWith(status: AuthStatus.authenticated, user: user);
-      } catch (_) {
-        await _service.logout();
+        await _connectWebSocket();
+      } on ApiException catch (e) {
+        if (e.statusCode == 401) {
+          await _clearSession();
+          return;
+        }
         state = state.copyWith(status: AuthStatus.notAuthenticated);
+      } catch (_) {
+        await _clearSession();
       }
     } else {
       state = state.copyWith(status: AuthStatus.notAuthenticated);
@@ -53,6 +61,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
     try {
       final user = await _service.login(email, password);
       state = state.copyWith(status: AuthStatus.authenticated, user: user);
+      await _connectWebSocket();
     } catch (e) {
       state = state.copyWith(
         status: AuthStatus.notAuthenticated,
@@ -78,6 +87,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
         phone: phone,
       );
       state = state.copyWith(status: AuthStatus.authenticated, user: user);
+      await _connectWebSocket();
     } catch (e) {
       state = state.copyWith(
         status: AuthStatus.notAuthenticated,
@@ -87,6 +97,21 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   Future<void> logout() async {
+    await _clearSession();
+  }
+
+  Future<void> _connectWebSocket() async {
+    final ws = WsService();
+    ws.reset();
+    await ws.connect();
+  }
+
+  void _disconnectWebSocket() {
+    WsService().close();
+  }
+
+  Future<void> _clearSession() async {
+    _disconnectWebSocket();
     await _service.logout();
     state = const AuthState(status: AuthStatus.notAuthenticated);
   }

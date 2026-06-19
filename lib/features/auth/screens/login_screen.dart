@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:si2_p1_mobile/shared/widgets/custom_filled_button.dart';
-import 'package:si2_p1_mobile/shared/widgets/custom_input_field.dart';
+import 'package:si2_p1_mobile/config/theme/app_theme.dart';
+import 'package:si2_p1_mobile/core/services/auth_service.dart';
+import 'package:si2_p1_mobile/core/services/notification_service.dart';
 import 'package:si2_p1_mobile/features/auth/providers/auth_provider.dart';
+import 'package:si2_p1_mobile/shared/widgets/custom_input_field.dart';
 import 'package:si2_p1_mobile/shared/widgets/app_toast.dart';
+import 'package:si2_p1_mobile/shared/widgets/custom_filled_button.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   static const name = 'login';
@@ -36,7 +39,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     if (!mounted) return;
     final state = ref.read(authProvider);
     if (state.status == AuthStatus.authenticated) {
-      context.go('/home');
+      final fcmToken = NotificationService().fcmToken;
+      if (fcmToken != null && fcmToken.isNotEmpty) {
+        try {
+          await AuthService().registerFcmToken(fcmToken);
+        } catch (_) {}
+      }
+      AppToast.success(context, message: 'Inicio de sesión exitoso');
+      final role = state.user?.role.toUpperCase();
+      if (role == 'TECNICO') {
+        context.go('/technician/home');
+      } else {
+        context.go('/home');
+      }
     } else if (state.errorMessage != null) {
       AppToast.error(context, message: state.errorMessage!);
     }
